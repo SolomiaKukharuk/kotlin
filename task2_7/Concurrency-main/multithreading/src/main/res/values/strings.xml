@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Threads</string>
+    <string name="btn_load_data">Завантажити дані</string>
+    <string name="tv_result_initial">Очікування...</string>
+</resources>
