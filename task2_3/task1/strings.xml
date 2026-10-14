@@ -1,0 +1,15 @@
+
+
+<resources>
+<string name="app_name">SimpleCalculator</string>
+
+<string name="first_number_hint">Введіть перше число</string>
+<string name="second_number_hint">Введіть друге число</string>
+
+<string name="button_add">+</string>
+<string name="button_subtract">-</string>
+<string name="button_multiply">*</string>
+<string name="button_divide">/</string>
+
+<string name="result">Результат:</string>
+</resources>
