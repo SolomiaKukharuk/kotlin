@@ -15,7 +15,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -37,25 +36,25 @@ class MainActivity : ComponentActivity() {
 
             PrivatBankCurrenciesTheme {
 
-                ExchangeArchiveScreen()
+                ExchangeRatesScreen()
             }
         }
     }
 }
 
 @Composable
-fun ExchangeArchiveScreen(
+fun ExchangeRatesScreen(
     viewModel: ExchangeArchiveViewModel = viewModel()
 ) {
 
     val selectedDate by
     viewModel.selectedDate.collectAsStateWithLifecycle()
 
-    val uiState by
-    viewModel.uiState.collectAsStateWithLifecycle()
+    val rates by
+    viewModel.rates.collectAsStateWithLifecycle()
 
-    val isLoading =
-        uiState is ExchangeArchiveUiState.Loading
+    val syncStatus by
+    viewModel.syncStatus.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -84,7 +83,6 @@ fun ExchangeArchiveScreen(
                 Text("dd.MM.yyyy")
             },
             singleLine = true,
-            enabled = !isLoading,
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -94,108 +92,86 @@ fun ExchangeArchiveScreen(
 
         Button(
             onClick = {
-                viewModel.loadExchangeRates()
+                viewModel.refreshRates()
             },
-            enabled = !isLoading,
             modifier = Modifier.fillMaxWidth()
         ) {
 
-            Text("Показати курси")
+            Text("Оновити")
+        }
+
+        if (syncStatus != null) {
+
+            Spacer(
+                modifier = Modifier.height(12.dp)
+            )
+
+            Text(
+                text = syncStatus!!,
+                style = MaterialTheme.typography.bodyMedium
+            )
         }
 
         Spacer(
-            modifier = Modifier.height(24.dp)
+            modifier = Modifier.height(20.dp)
         )
 
-        when (val state = uiState) {
+        when {
 
-            ExchangeArchiveUiState.Initial -> {
+            selectedDate.isBlank() -> {
 
                 Text(
                     text =
-                        "Введіть дату у форматі dd.MM.yyyy та натисніть «Показати курси»."
+                        "Введіть дату у форматі dd.MM.yyyy"
                 )
             }
 
-            ExchangeArchiveUiState.Loading -> {
+            rates.isEmpty() -> {
 
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment =
-                        Alignment.CenterHorizontally
+                Text(
+                    text =
+                        "Курси за цю дату ще не завантажені"
+                )
+            }
+
+            else -> {
+
+                Text(
+                    text = "Курси на $selectedDate",
+                    style =
+                        MaterialTheme.typography.titleMedium
+                )
+
+                if (
+                    syncStatus ==
+                    "Сервер не повернув курсів"
                 ) {
 
-                    CircularProgressIndicator()
-
-                    Spacer(
-                        modifier =
-                            Modifier.height(12.dp)
-                    )
-
-                    Text("Завантаження курсів...")
-                }
-            }
-
-            is ExchangeArchiveUiState.Error -> {
-
-                Column {
-
-                    Text(
-                        text = state.message,
-                        color =
-                            MaterialTheme.colorScheme.error
-                    )
-
-                    Spacer(
-                        modifier =
-                            Modifier.height(12.dp)
-                    )
-
-                    Button(
-                        onClick = {
-                            viewModel.loadExchangeRates()
-                        }
-                    ) {
-
-                        Text("Спробувати ще раз")
-                    }
-                }
-            }
-
-            is ExchangeArchiveUiState.Success -> {
-
-                if (state.rates.isEmpty()) {
-
                     Text(
                         text =
-                            "Для цієї дати дані відсутні."
-                    )
-
-                } else {
-
-                    Text(
-                        text =
-                            "Курси на ${state.date}",
+                            "Показані раніше збережені дані",
                         style =
-                            MaterialTheme.typography.titleMedium
+                            MaterialTheme.typography.bodySmall
                     )
+                }
 
-                    Spacer(
-                        modifier =
-                            Modifier.height(12.dp)
-                    )
+                Spacer(
+                    modifier = Modifier.height(12.dp)
+                )
 
-                    LazyColumn(
-                        modifier =
-                            Modifier.weight(1f),
-                        verticalArrangement =
-                            Arrangement.spacedBy(8.dp)
-                    ) {
+                LazyColumn(
+                    verticalArrangement =
+                        Arrangement.spacedBy(8.dp)
+                ) {
 
-                        items(state.rates) { rate ->
-
-                            ExchangeRateCard(rate)
+                    items(
+                        items = rates,
+                        key = {
+                            "${it.date}_${it.currency}"
                         }
+                    ) { rate ->
+
+                        ExchangeRateCard(rate)
                     }
                 }
             }
@@ -205,17 +181,21 @@ fun ExchangeArchiveScreen(
 
 @Composable
 fun ExchangeRateCard(
-    rate: ExchangeRateItem
+    rate: ExchangeRateEntity
 ) {
 
     val purchase =
         rate.purchaseRate
-            ?.let { "%.2f".format(it) }
+            ?.let {
+                "%.2f".format(it)
+            }
             ?: "—"
 
     val sale =
         rate.saleRate
-            ?.let { "%.2f".format(it) }
+            ?.let {
+                "%.2f".format(it)
+            }
             ?: "—"
 
     Card(
@@ -227,15 +207,14 @@ fun ExchangeRateCard(
         ) {
 
             Text(
-                text =
-                    rate.currency ?: "Невідома валюта",
+                text = rate.currency,
                 style =
                     MaterialTheme.typography.titleLarge
             )
 
             Text(
                 text =
-                    "Базова валюта: ${rate.baseCurrency ?: "UAH"}"
+                    "Базова валюта: ${rate.baseCurrency}"
             )
 
             Spacer(
@@ -243,7 +222,8 @@ fun ExchangeRateCard(
             )
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier =
+                    Modifier.fillMaxWidth(),
                 horizontalArrangement =
                     Arrangement.SpaceBetween
             ) {

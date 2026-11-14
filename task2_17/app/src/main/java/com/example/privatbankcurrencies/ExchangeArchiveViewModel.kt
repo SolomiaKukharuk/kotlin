@@ -1,22 +1,42 @@
 package com.example.privatbankcurrencies
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import retrofit2.Call
-import retrofit2.Callback
-import retrofit2.Response
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
 import java.util.Locale
-import android.util.Log
 
-class ExchangeArchiveViewModel : ViewModel() {
+@OptIn(ExperimentalCoroutinesApi::class)
+class ExchangeArchiveViewModel(
+    application: Application
+) : AndroidViewModel(application) {
 
-    private val api =
-        PrivatBankNetworkModule().service
+    private val context =
+        application.applicationContext
+
+    private val dao =
+        ExchangeDatabase
+            .getDatabase(context)
+            .exchangeRateDao()
+
+    private val workManager =
+        WorkManager.getInstance(context)
 
     private val _selectedDate =
         MutableStateFlow("")
@@ -24,110 +44,115 @@ class ExchangeArchiveViewModel : ViewModel() {
     val selectedDate: StateFlow<String> =
         _selectedDate.asStateFlow()
 
-    private val _uiState =
-        MutableStateFlow<ExchangeArchiveUiState>(
-            ExchangeArchiveUiState.Initial
-        )
+    val rates: StateFlow<List<ExchangeRateEntity>> =
+        _selectedDate
+            .flatMapLatest { date ->
 
-    val uiState: StateFlow<ExchangeArchiveUiState> =
-        _uiState.asStateFlow()
+                if (date.isBlank()) {
+                    flowOf(emptyList())
+                } else {
+                    dao.observeRates(date)
+                }
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
 
-    private var currentCall:
-            Call<ExchangeArchiveResponse>? = null
+    private val _syncStatus =
+        MutableStateFlow<String?>(null)
 
-    fun onDateChanged(date: String) {
+    val syncStatus: StateFlow<String?> =
+        _syncStatus.asStateFlow()
+
+    fun onDateChanged(
+        date: String
+    ) {
         _selectedDate.value = date
+        _syncStatus.value = null
     }
 
-    fun loadExchangeRates() {
+    fun refreshRates() {
 
-        val date = _selectedDate.value.trim()
+        val date =
+            _selectedDate.value.trim()
 
         if (!isValidDate(date)) {
-            _uiState.value =
-                ExchangeArchiveUiState.Error(
-                    "Введіть коректну дату у форматі dd.MM.yyyy"
-                )
+
+            _syncStatus.value =
+                "Некоректна дата"
+
             return
         }
 
-        currentCall?.cancel()
+        val constraints =
+            Constraints.Builder()
+                .setRequiredNetworkType(
+                    NetworkType.CONNECTED
+                )
+                .build()
 
-        _uiState.value =
-            ExchangeArchiveUiState.Loading
+        val request =
+            OneTimeWorkRequestBuilder<ExchangeRatesSyncWorker>()
+                .setInputData(
+                    workDataOf(
+                        "date" to date
+                    )
+                )
+                .setConstraints(constraints)
+                .build()
 
-        Log.d(
-            "PRIVAT_API",
-            "Початок запиту курсів на дату: $date"
+        val workName =
+            "exchange_rates_$date"
+
+        workManager.enqueueUniqueWork(
+            workName,
+            ExistingWorkPolicy.KEEP,
+            request
         )
 
-        val call =
-            api.getExchangeRates(date)
+        observeWork(request.id)
+    }
 
-        currentCall = call
+    private fun observeWork(
+        workId: java.util.UUID
+    ) {
 
-        call.enqueue(
-            object : Callback<ExchangeArchiveResponse> {
+        workManager
+            .getWorkInfoByIdLiveData(workId)
+            .observeForever { workInfo ->
 
-                override fun onResponse(
-                    call: Call<ExchangeArchiveResponse>,
-                    response: Response<ExchangeArchiveResponse>
-                ) {
-
-                    if (response.isSuccessful) {
-
-                        val body = response.body()
-
-                        if (body != null) {
-
-                            val visibleRates =
-                                body.exchangeRate.filter {
-                                    !it.currency.isNullOrBlank()
-                                }
-
-                            _uiState.value =
-                                ExchangeArchiveUiState.Success(
-                                    date = body.date,
-                                    rates = visibleRates
-                                )
-
-                        } else {
-
-                            _uiState.value =
-                                ExchangeArchiveUiState.Error(
-                                    "Сервер повернув порожню відповідь"
-                                )
-                        }
-
-                    } else {
-
-                        _uiState.value =
-                            ExchangeArchiveUiState.Error(
-                                "Помилка сервера: ${response.code()}"
-                            )
-                    }
-
-                    currentCall = null
+                if (workInfo == null) {
+                    return@observeForever
                 }
 
-                override fun onFailure(
-                    call: Call<ExchangeArchiveResponse>,
-                    t: Throwable
-                ) {
+                _syncStatus.value =
+                    when (workInfo.state) {
 
-                    if (!call.isCanceled) {
+                        WorkInfo.State.ENQUEUED ->
+                            "Очікує мережі / запуску"
 
-                        _uiState.value =
-                            ExchangeArchiveUiState.Error(
-                                "Не вдалося завантажити курси. " +
-                                        "Перевірте з'єднання та спробуйте знову"
-                            )
+                        WorkInfo.State.RUNNING ->
+                            "Оновлюється"
+
+                        WorkInfo.State.SUCCEEDED ->
+                            workInfo.outputData
+                                .getString("message")
+                                ?: "Курси оновлено"
+
+                        WorkInfo.State.FAILED ->
+                            workInfo.outputData
+                                .getString("message")
+                                ?: "Помилка оновлення"
+
+                        WorkInfo.State.CANCELLED ->
+                            "Оновлення скасовано"
+
+                        WorkInfo.State.BLOCKED ->
+                            "Очікує запуску"
                     }
-
-                    currentCall = null
-                }
             }
-        )
     }
 
     private fun isValidDate(
@@ -142,37 +167,13 @@ class ExchangeArchiveViewModel : ViewModel() {
                 isLenient = false
             }
 
-        val parsedDate: Date =
-            try {
-                formatter.parse(value)
-                    ?: return false
-            } catch (e: Exception) {
-                return false
-            }
+        return try {
 
-        val today =
-            Calendar.getInstance()
+            formatter.parse(value) != null
 
-        if (parsedDate.after(today.time)) {
-            return false
+        } catch (e: Exception) {
+
+            false
         }
-
-        val fourYearsAgo =
-            Calendar.getInstance().apply {
-                add(Calendar.YEAR, -4)
-            }
-
-        if (parsedDate.before(fourYearsAgo.time)) {
-            return false
-        }
-
-        return true
-    }
-
-    override fun onCleared() {
-
-        currentCall?.cancel()
-
-        super.onCleared()
     }
 }
